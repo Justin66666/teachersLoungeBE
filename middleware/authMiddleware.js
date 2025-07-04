@@ -1,47 +1,5 @@
-/*import jwt from "jsonwebtoken";
-
-import connection from '../database.js';
-
-const userAuth = async (req, res, next) => {
-  // Get token from header
-  const token = req.headers.authorization;
-
-  // Check if the token is present and properly formatted
-  if (!token || !token.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Unauthorized request" });
-  }
-
-  const tokenValue = token.split(' ')[1]; // Extract the token part
-
-
-    // Get email from the token
-    const { email } = jwt.verify(tokenValue, process.env.JWT_SECRET);
-
-    // Attach user id for further requests
-    connection.query("select * from USER where USER.email=\""+email+"\";", function(error, results){
-
-        // Return error if any
-        if(error){
-            console.error(error.stack);
-            return res.status(500).json({message:"Server error: "+error.stack});
-        }
-
-        // Return error if no user is found
-        if(results[0]==null){
-            return res.status(401).json({message:"No user found with this email"});
-        }else{
-            req.userEmail = email; 
-        }
-    }
-    );
-
-    // Move forward with request
-    next();
-};
-
-export {userAuth};*/
 import jwt from "jsonwebtoken";
-import connection from '../database.js';
+import pool from '../database.js';
 
 const userAuth = async (req, res, next) => {
   const token = req.headers.authorization;
@@ -57,26 +15,25 @@ const userAuth = async (req, res, next) => {
 
     const email = decoded.email;
     const role = decoded.role;
-    console.log("Email from token:", email); // ✅ debug log
+    console.log("Email from token:", email);
     const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
 
     if (result.rows.length === 0) {
       return res.status(401).json({ message: "No user found with this email" });
     }
 
-    // ✅ Attach to request
+    // Set both for backward compatibility and new consistency
     req.userEmail = email;
     req.userRole = role;
+    req.user = { email, role }; // Add this for private spaces consistency
 
-    console.log("Decoded user:", email, role); // ✅ debug log
+    console.log("Decoded user:", email, role);
     next();
   } catch (err) {
     console.error("Token verification failed:", err);
     return res.status(401).json({ message: "Invalid token" });
   }
 };
-
-
 
 const verifyAdmin = (req, res, next) => {
   if (req.userRole !== 'Admin') {
@@ -85,11 +42,9 @@ const verifyAdmin = (req, res, next) => {
   next();
 };
 
-import pool from '../database.js';
-
 const verifyAdminOrOwner = async (req, res, next) => {
   const postId = req.params.postId;
-  console.log("Post ID:", postId); // Log the postId for debugging
+  console.log("Post ID:", postId);
   console.log("Request path:", req.path);
   console.log("Post ID from params:", req.params.postId);
   console.log("User role:", req.userRole);
@@ -143,7 +98,6 @@ const verifyAdminOrCommentOwner = async (req, res, next) => {
     return res.status(500).json({ message: "Server error: " + error.stack });
   }
 };
-
 
 export { userAuth, verifyAdmin, verifyAdminOrOwner, verifyAdminOrCommentOwner };
 

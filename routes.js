@@ -62,7 +62,23 @@ import {
   checkIfMuted,
   blockUser,
   unblockUser,
-  checkIfBlocked
+  checkIfBlocked,
+  createPrivateSpace,
+  getUserPrivateSpaces,
+  getPrivateSpaceDetails,
+  inviteToPrivateSpace,
+  acceptPrivateSpaceInvitation,
+  getPendingInvitations,
+  createPrivateSpacePost,
+  getPrivateSpacePosts,
+  addPrivateSpaceComment,
+  getPrivateSpaceComments,
+  getPrivateSpaceMembers,
+  removePrivateSpaceMember,
+  deletePrivateSpacePost,
+  getInvitableUsers,
+  searchInvitableUsers,
+  dissolvePrivateSpace
 } from "./dbLogic.js";
 
 const router = express.Router();
@@ -154,6 +170,24 @@ router.get("/checkIfMuted", checkIfMuted)
 router.post("/blockUser", blockUser);
 router.delete("/unblockUser", unblockUser);
 router.get("/checkIfBlocked", checkIfBlocked);
+
+// Private Spaces Routes
+router.post("/createPrivateSpace", userAuth, createPrivateSpace);
+router.get("/getUserPrivateSpaces", userAuth, getUserPrivateSpaces);
+router.get("/getPrivateSpaceDetails/:spaceId", userAuth, getPrivateSpaceDetails);
+router.post("/inviteToPrivateSpace/:spaceId", userAuth, inviteToPrivateSpace);
+router.post("/acceptPrivateSpaceInvitation/:invitationId", userAuth, acceptPrivateSpaceInvitation);
+router.get("/getPendingInvitations", userAuth, getPendingInvitations);
+router.post("/createPrivateSpacePost/:spaceId", userAuth, createPrivateSpacePost);
+router.get("/getPrivateSpacePosts/:spaceId", userAuth, getPrivateSpacePosts);
+router.post("/addPrivateSpaceComment/:postId", userAuth, addPrivateSpaceComment);
+router.get("/getPrivateSpaceComments/:postId", userAuth, getPrivateSpaceComments);
+router.get("/getPrivateSpaceMembers/:spaceId", userAuth, getPrivateSpaceMembers);
+router.delete("/removePrivateSpaceMember/:spaceId/:memberEmail", userAuth, removePrivateSpaceMember);
+router.delete("/deletePrivateSpacePost/:postId", userAuth, deletePrivateSpacePost);
+router.get("/getInvitableUsers/:spaceId", userAuth, getInvitableUsers);
+router.get("/searchInvitableUsers/:spaceId", userAuth, searchInvitableUsers);
+router.delete("/dissolvePrivateSpace/:spaceId", userAuth, dissolvePrivateSpace);
 
 // Test Route
 router.get("/getTest", getTest);

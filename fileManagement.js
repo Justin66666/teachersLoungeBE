@@ -1,4 +1,5 @@
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import multer from "multer";
 import { configDotenv } from "dotenv";
 
@@ -7,18 +8,41 @@ configDotenv();
 
 //Initialize s3 info
 const s3 = new S3Client({
+  region: "us-east-2", // Hardcode the region to ensure it's always set
   credentials: {
     accessKeyId: process.env.S3_ACCESS_KEY,
     secretAccessKey: process.env.S3_SECRET_KEY,
   },
-  region: process.env.S3_REGION,
+  forcePathStyle: false,
+  signatureVersion: 'v4',
 });
+
+// Set AWS region environment variable if not set
+if (!process.env.AWS_REGION) {
+  process.env.AWS_REGION = 'us-east-2';
+}
 
 
 
 //Functions for managing files
 
-// Was getting errors related to double response, so moved to dbLogic
+// Function to generate presigned URL for accessing private S3 objects
+const generatePresignedUrl = async (key) => {
+  try {
+    const command = new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET,
+      Key: key,
+    });
+    
+    // Generate presigned URL that expires in 1 hour
+    const presignedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+    return presignedUrl;
+  } catch (error) {
+    console.error("Error generating presigned URL:", error);
+    return null;
+  }
+};
+
 //Function to upload to s3
 const s3Upload = async (req,res) => {   
     const file = req.file;
@@ -40,18 +64,52 @@ const s3Upload = async (req,res) => {
     // Upload file to S3
     console.log("Putting object in S3 with params: ", params);
     const command = new PutObjectCommand(params);
-     
-    await s3.send(command);
 
     try {
+      console.log("Attempting S3 upload...");
       await s3.send(command);
-      res.status(200).send({ message: 'Image uploaded successfully', bucket: process.env.S3_BUCKET, file: fileLoc });
-      console.log("File uploaded successfully: " + process.env.S3_BUCKET + "/" + fileLoc);
-      return `https://${process.env.S3_BUCKET}.s3.${process.env.S3_REGION}.amazonaws.com/${fileLoc}`; // Return the file URL
+      
+      // Generate presigned URL for accessing the uploaded file
+      const presignedUrl = await generatePresignedUrl(fileLoc);
+      
+      if (presignedUrl) {
+        res.status(200).send({ 
+          message: 'Image uploaded successfully', 
+          bucket: process.env.S3_BUCKET, 
+          file: fileLoc,
+          url: presignedUrl 
+        });
+        console.log("File uploaded successfully with presigned URL: " + presignedUrl);
+        return presignedUrl;
+      } else {
+        // Fallback to direct URL if presigned URL generation fails
+        const fileUrl = `https://${process.env.S3_BUCKET}.s3.${process.env.AWS_REGION || 'us-east-2'}.amazonaws.com/${fileLoc}`;
+        res.status(200).send({ 
+          message: 'Image uploaded successfully', 
+          bucket: process.env.S3_BUCKET, 
+          file: fileLoc,
+          url: fileUrl 
+        });
+        console.log("File uploaded successfully: " + fileUrl);
+        return fileUrl;
+      }
 
     } catch (err) {
-      console.error(err);
-      res.status(500).send({ message: 'Image upload failed', error: err.message });
+      console.error("S3 Upload Error:", err);
+      console.error("Error details:", {
+        message: err.message,
+        code: err.code,
+        name: err.name
+      });
+      
+      // Send error response but don't crash the server
+      if (!res.headersSent) {
+        res.status(500).send({ 
+          message: 'Image upload failed', 
+          error: err.message,
+          details: 'S3 configuration or network issue'
+        });
+      }
       return null;
     }
   }
@@ -94,4 +152,6 @@ const fileHelper = multer({
   }
 });*/
 
-export {s3Upload, s3Delete, upload};
+const fileUpload = s3Upload;
+
+export { s3Upload, s3Delete, upload, fileUpload };

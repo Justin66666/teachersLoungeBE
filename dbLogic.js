@@ -607,91 +607,8 @@ const fileUpload = async (req, res, next) => {
 };*/
 
 const fileUpload = async (req, res) => {
-
-  // Output info about the recieved request
-  //console.log('File upload hit');
-  //console.log(req.body.name);
-
-  const file = req.file;
-
-  // Log file
-  console.log("\nFile: " + file + "\n");
-  console.time("File upload");
-
-  // Name file with timestamp
-  const fileLoc = "uploads/" + file.originalname.split(' ').join('_');
-
-  /* If file is image, compress it to JPEG
-  let compressedBuffer = file.buffer;
-  if (file.mimetype.startsWith("image/")) {
-    console.log("Compressing image file...");
-
-    // Changing quality to dynamically adjust based on file size would be nice
-    compressedBuffer = await sharp(file.buffer)
-      .jpeg({ quality: 10 }) // Compress to JPEG with 10% quality
-      .toBuffer();
-  } else { // Set limit on file size to 10MB otherwise
-    if (file.size > 5 * 1024 * 1024) {
-      return res.status(400).json({ message: "File size exceeds 5MB limit." });
-    }
-  }*/
-
-  // Output the size of the original file and the compressed file
-  console.log("Original file size: " + file.size + " bytes");
-  //console.log("Compressed file size: " + compressedBuffer.length + " bytes");
-
-  // Set up parameters for S3 upload
-  const params = {
-    Bucket: process.env.S3_BUCKET,
-    Body: file.buffer, // Change back to file.buffer to undo compression
-    Key: fileLoc,
-    ContentType: file.mimetype
-  };
-
-  // Upload file to S3
-  console.log("Putting object in S3 with params: ", params);
-  const command = new PutObjectCommand(params);
-
-  await s3.send(command);
-
-  try {
-    await s3.send(command);
-    res.status(200).send({ message: 'Upload was successful!', bucket: process.env.S3_BUCKET, file: fileLoc });
-    console.log("File uploaded successfully: " + process.env.S3_BUCKET + "/" + fileLoc);
-
-    // If it's a profile picture
-    if (req.body.isProfilePic) {
-      // Update the profilePicUrl in the database for the current user
-
-      // Log email to make sure it's for the logged in user
-      console.log("About to update profile picture for user: " + req.body.email);
-
-      // Update the profilePicUrl in the database for the current user
-      const sql = "UPDATE USERS SET profilepiclink = $1 WHERE email = $2";
-      const values = [`https://${process.env.S3_BUCKET}.s3.us-east-2.amazonaws.com/${fileLoc}`, req.body.email];
-      await pool.query(sql, values);
-
-      // Log success
-      console.log("Profile picture updated successfully for user: " + req.body.email);
-    }
-    console.timeEnd("File upload");
-    return `https://${process.env.S3_BUCKET}.s3.${process.env.S3_REGION}.amazonaws.com/${fileLoc}`; // Return the file URL
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: 'File upload failed', error: error.message });
-  }
-
-  /*try {
-    const fileUrl = await s3Upload(req, res);
-    req.body.fileurl = fileUrl; // Set the fileUrl in the request body
-    return res.status(200).json({ message: 'File uploaded successfully', fileUrl: fileUrl });
-  } catch (error) {
-    console.error(error);
-    //return res.status(500).json({ message: 'File upload failed', error: error.message });
-    return null;
-  }*/
-};
+  return s3Upload(req, res);
+}
 
 const getAllApprovedPostsByUser = async (req, res, next) => {
   console.log('getAllApprovedPostsByUser hit');
@@ -1824,15 +1741,822 @@ const checkIfBlocked = async (req, res, next) => {
 };
 
 const getTest = (req, res, next) => {
-  const sql = 'SELECT * FROM USERS';
-  pool.query(sql, function (error, results) {
-    if (error) {
-      console.error(error.stack);
-      return res.status(500).json({ message: "Server error, try again" });
-    }
+  // Test the exact query used in getInvitableUsers
+  const spaceId = 4;
+  const userEmail = 'Admin@admin.com';
+  
+  const testQueries = [
+    // Check admin permissions
+    'SELECT role FROM private_space_members WHERE space_id = $1 AND email = $2',
+    // Test the main user query
+    `SELECT DISTINCT 
+      u.email,
+      u.firstname,
+      u.lastname,
+      u.firstname || ' ' || u.lastname as name,
+      u.profilepiclink as avatar,
+      s.schoolname
+    FROM users u
+    LEFT JOIN school s ON u.schoolid = s.schoolid
+    WHERE u.email NOT IN (
+      SELECT email FROM private_space_members WHERE space_id = $1
+      UNION
+      SELECT invitee_email FROM private_space_invitations 
+      WHERE space_id = $1 AND status = 'pending'
+    )
+    AND u.email IS NOT NULL
+    AND u.firstname IS NOT NULL
+    AND u.lastname IS NOT NULL
+    AND u.role = 'Approved'
+    ORDER BY u.firstname, u.lastname
+    LIMIT 10`
+  ];
+  
+  Promise.all([
+    pool.query(testQueries[0], [spaceId, userEmail]),
+    pool.query(testQueries[1], [spaceId])
+  ])
+    .then(results => {
+      res.status(200).json({
+        adminCheck: results[0].rows,
+        users: results[1].rows,
+        userCount: results[1].rows.length
+      });
+    })
+    .catch(error => {
+      console.error('Test query error:', error);
+      res.status(500).json({ error: error.message });
+    });
+};
 
-    return res.status(200).json({ data: results });
-  });
+// Private Spaces Functions
+
+// Create a new private space
+const createPrivateSpace = async (req, res, next) => {
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    // Insert the new private space
+    const spaceQuery = `
+      INSERT INTO private_spaces (name, description, avatar_url, creator_email, created_at)
+      VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+      RETURNING space_id, name, description, avatar_url, creator_email, created_at
+    `;
+    
+    const spaceResult = await client.query(spaceQuery, [
+      req.body.name,
+      req.body.description || '',
+      req.body.avatarUrl || null,
+      req.user.email
+    ]);
+    
+    const newSpace = spaceResult.rows[0];
+    
+    // Add creator as the first member with admin role
+    const memberQuery = `
+      INSERT INTO private_space_members (space_id, email, role, joined_at)
+      VALUES ($1, $2, 'admin', CURRENT_TIMESTAMP)
+    `;
+    
+    await client.query(memberQuery, [newSpace.space_id, req.user.email]);
+    
+    await client.query('COMMIT');
+    
+    return res.status(201).json({
+      message: 'Private space created successfully',
+      space: newSpace
+    });
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error creating private space:', error);
+    return res.status(500).json({ message: 'Failed to create private space' });
+  } finally {
+    client.release();
+  }
+};
+
+// Get all private spaces for a user
+const getUserPrivateSpaces = async (req, res, next) => {
+  try {
+    const query = `
+      SELECT 
+        ps.space_id,
+        ps.name,
+        ps.description,
+        ps.avatar_url,
+        ps.creator_email,
+        ps.created_at,
+        psm.role as user_role,
+        COUNT(DISTINCT psm2.email) as member_count,
+        COUNT(DISTINCT psp.post_id) as post_count
+      FROM private_spaces ps
+      INNER JOIN private_space_members psm ON ps.space_id = psm.space_id
+      LEFT JOIN private_space_members psm2 ON ps.space_id = psm2.space_id
+      LEFT JOIN private_space_posts psp ON ps.space_id = psp.space_id
+      WHERE psm.email = $1
+      GROUP BY ps.space_id, ps.name, ps.description, ps.avatar_url, 
+               ps.creator_email, ps.created_at, psm.role
+      ORDER BY ps.created_at DESC
+    `;
+    
+    const result = await pool.query(query, [req.user.email]);
+    
+    return res.status(200).json({
+      spaces: result.rows
+    });
+    
+  } catch (error) {
+    console.error('Error fetching user private spaces:', error);
+    return res.status(500).json({ message: 'Failed to fetch private spaces' });
+  }
+};
+
+// Get private space details (only for members)
+const getPrivateSpaceDetails = async (req, res, next) => {
+  const spaceId = req.params.spaceId;
+  
+  try {
+    // Check if user is a member
+    const memberCheck = await pool.query(
+      'SELECT role FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Access denied. You are not a member of this space.' });
+    }
+    
+    // Get space details
+    const spaceQuery = `
+      SELECT 
+        ps.*,
+        u.firstname || ' ' || u.lastname as creator_name,
+        COUNT(DISTINCT psm.email) as member_count
+      FROM private_spaces ps
+      INNER JOIN users u ON ps.creator_email = u.email
+      LEFT JOIN private_space_members psm ON ps.space_id = psm.space_id
+      WHERE ps.space_id = $1
+      GROUP BY ps.space_id, u.firstname, u.lastname
+    `;
+    
+    const spaceResult = await pool.query(spaceQuery, [spaceId]);
+    
+    if (spaceResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Private space not found' });
+    }
+    
+    return res.status(200).json({
+      space: spaceResult.rows[0],
+      userRole: memberCheck.rows[0].role
+    });
+    
+  } catch (error) {
+    console.error('Error fetching private space details:', error);
+    return res.status(500).json({ message: 'Failed to fetch space details' });
+  }
+};
+
+// Invite user to private space (admin only)
+const inviteToPrivateSpace = async (req, res, next) => {
+  const { spaceId } = req.params;
+  const { inviteeEmail } = req.body;
+  
+  try {
+    // Check if requester is admin
+    const adminCheck = await pool.query(
+      'SELECT role FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    if (adminCheck.rows.length === 0 || adminCheck.rows[0].role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can invite members' });
+    }
+    
+    // Check if invitee exists
+    const userCheck = await pool.query('SELECT email FROM users WHERE email = $1', [inviteeEmail]);
+    
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if already a member
+    const memberCheck = await pool.query(
+      'SELECT email FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, inviteeEmail]
+    );
+    
+    if (memberCheck.rows.length > 0) {
+      return res.status(400).json({ message: 'User is already a member' });
+    }
+    
+    // Create invitation
+    const inviteQuery = `
+      INSERT INTO private_space_invitations (space_id, inviter_email, invitee_email, created_at, status)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 'pending')
+      RETURNING invitation_id
+    `;
+    
+    const result = await pool.query(inviteQuery, [spaceId, req.user.email, inviteeEmail]);
+    
+    return res.status(201).json({
+      message: 'Invitation sent successfully',
+      invitationId: result.rows[0].invitation_id
+    });
+    
+  } catch (error) {
+    console.error('Error inviting to private space:', error);
+    return res.status(500).json({ message: 'Failed to send invitation' });
+  }
+};
+
+// Accept invitation to private space
+const acceptPrivateSpaceInvitation = async (req, res, next) => {
+  const { invitationId } = req.params;
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    // Get invitation details
+    const inviteQuery = `
+      SELECT * FROM private_space_invitations 
+      WHERE invitation_id = $1 AND invitee_email = $2 AND status = 'pending'
+    `;
+    
+    const inviteResult = await client.query(inviteQuery, [invitationId, req.user.email]);
+    
+    if (inviteResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Invalid or expired invitation' });
+    }
+    
+    const invitation = inviteResult.rows[0];
+    
+    // Add user as member
+    const memberQuery = `
+      INSERT INTO private_space_members (space_id, email, role, joined_at)
+      VALUES ($1, $2, 'member', CURRENT_TIMESTAMP)
+    `;
+    
+    await client.query(memberQuery, [invitation.space_id, req.user.email]);
+    
+    // Update invitation status
+    await client.query(
+      'UPDATE private_space_invitations SET status = $1, responded_at = CURRENT_TIMESTAMP WHERE invitation_id = $2',
+      ['accepted', invitationId]
+    );
+    
+    await client.query('COMMIT');
+    
+    return res.status(200).json({
+      message: 'Successfully joined private space',
+      spaceId: invitation.space_id
+    });
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error accepting invitation:', error);
+    return res.status(500).json({ message: 'Failed to accept invitation' });
+  } finally {
+    client.release();
+  }
+};
+
+// Get pending invitations for a user
+const getPendingInvitations = async (req, res, next) => {
+  try {
+    const query = `
+      SELECT 
+        psi.invitation_id,
+        psi.space_id,
+        psi.inviter_email,
+        psi.created_at,
+        ps.name as space_name,
+        ps.description as space_description,
+        u.firstname || ' ' || u.lastname as inviter_name
+      FROM private_space_invitations psi
+      INNER JOIN private_spaces ps ON psi.space_id = ps.space_id
+      INNER JOIN users u ON psi.inviter_email = u.email
+      WHERE psi.invitee_email = $1 AND psi.status = 'pending'
+      ORDER BY psi.created_at DESC
+    `;
+    
+    const result = await pool.query(query, [req.user.email]);
+    
+    return res.status(200).json({
+      invitations: result.rows
+    });
+    
+  } catch (error) {
+    console.error('Error fetching invitations:', error);
+    return res.status(500).json({ message: 'Failed to fetch invitations' });
+  }
+};
+
+// Create post in private space
+const createPrivateSpacePost = async (req, res, next) => {
+  const { spaceId } = req.params;
+  const { content, fileUrl } = req.body;
+  
+  try {
+    // Check if user is a member
+    const memberCheck = await pool.query(
+      'SELECT email FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Only members can post in this space' });
+    }
+    
+    // Create post
+    const postQuery = `
+      INSERT INTO private_space_posts (space_id, email, content, file_url, created_at)
+      VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+      RETURNING post_id, space_id, email, content, file_url, created_at
+    `;
+    
+    const result = await pool.query(postQuery, [spaceId, req.user.email, content, fileUrl || null]);
+    
+    return res.status(201).json({
+      message: 'Post created successfully',
+      post: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('Error creating private space post:', error);
+    return res.status(500).json({ message: 'Failed to create post' });
+  }
+};
+
+// Get posts from private space
+const getPrivateSpacePosts = async (req, res, next) => {
+  const { spaceId } = req.params;
+  const { page = 1, limit = 20 } = req.query;
+  const offset = (page - 1) * limit;
+  
+  try {
+    // Check if user is a member
+    const memberCheck = await pool.query(
+      'SELECT email FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Only members can view posts' });
+    }
+    
+    // Get posts
+    const postsQuery = `
+      SELECT 
+        psp.*,
+        u.firstname || ' ' || u.lastname as author_name,
+        u.profilepiclink as author_avatar,
+        COUNT(DISTINCT pspc.comment_id) as comment_count
+      FROM private_space_posts psp
+      INNER JOIN users u ON psp.email = u.email
+      LEFT JOIN private_space_post_comments pspc ON psp.post_id = pspc.post_id
+      WHERE psp.space_id = $1
+      GROUP BY psp.post_id, u.firstname, u.lastname, u.profilepiclink
+      ORDER BY psp.created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+    
+    const result = await pool.query(postsQuery, [spaceId, limit, offset]);
+    
+    return res.status(200).json({
+      posts: result.rows,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+    
+  } catch (error) {
+    console.error('Error fetching private space posts:', error);
+    return res.status(500).json({ message: 'Failed to fetch posts' });
+  }
+};
+
+// Add comment to private space post
+const addPrivateSpaceComment = async (req, res, next) => {
+  const { postId } = req.params;
+  const { content } = req.body;
+  
+  console.log("addPrivateSpaceComment - postId:", postId, "content:", content);
+  console.log("req.params:", req.params);
+  console.log("req.body:", req.body);
+  
+  // Convert postId to integer and validate
+  const postIdInt = parseInt(postId);
+  if (!postId || postId === 'undefined' || isNaN(postIdInt)) {
+    console.error("Invalid postId:", postId);
+    return res.status(400).json({ message: 'Invalid post ID' });
+  }
+  
+  try {
+    // Verify post exists and user has access
+    const postQuery = `
+      SELECT psp.space_id 
+      FROM private_space_posts psp
+      INNER JOIN private_space_members psm ON psp.space_id = psm.space_id
+      WHERE psp.post_id = $1 AND psm.email = $2
+    `;
+    
+    const postCheck = await pool.query(postQuery, [postIdInt, req.user.email]);
+    
+    if (postCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    
+    // Create comment
+    const commentQuery = `
+      INSERT INTO private_space_post_comments (post_id, email, content, created_at)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      RETURNING comment_id, post_id, email, content, created_at
+    `;
+    
+    const result = await pool.query(commentQuery, [postIdInt, req.user.email, content]);
+    
+    return res.status(201).json({
+      message: 'Comment added successfully',
+      comment: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('Error adding comment:', error);
+    return res.status(500).json({ message: 'Failed to add comment' });
+  }
+};
+
+// Get comments for private space post
+const getPrivateSpaceComments = async (req, res, next) => {
+  const { postId } = req.params;
+  
+  // Convert postId to integer and validate
+  const postIdInt = parseInt(postId);
+  if (!postId || postId === 'undefined' || isNaN(postIdInt)) {
+    console.error("Invalid postId:", postId);
+    return res.status(400).json({ message: 'Invalid post ID' });
+  }
+  
+  try {
+    // Verify post exists and user has access
+    const postQuery = `
+      SELECT psp.space_id 
+      FROM private_space_posts psp
+      INNER JOIN private_space_members psm ON psp.space_id = psm.space_id
+      WHERE psp.post_id = $1 AND psm.email = $2
+    `;
+    
+    const postCheck = await pool.query(postQuery, [postIdInt, req.user.email]);
+    
+    if (postCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    
+    // Get comments
+    const commentsQuery = `
+      SELECT 
+        pspc.comment_id,
+        pspc.post_id,
+        pspc.email,
+        pspc.content,
+        pspc.created_at,
+        u.firstname || ' ' || u.lastname as author_name,
+        u.profilepiclink as author_avatar
+      FROM private_space_post_comments pspc
+      INNER JOIN users u ON pspc.email = u.email
+      WHERE pspc.post_id = $1
+      ORDER BY pspc.created_at ASC
+    `;
+    
+    const result = await pool.query(commentsQuery, [postIdInt]);
+    
+    return res.status(200).json({
+      comments: result.rows
+    });
+    
+  } catch (error) {
+    console.error('Error fetching comments:', error);
+    return res.status(500).json({ message: 'Failed to fetch comments' });
+  }
+};
+
+// Get members of private space
+const getPrivateSpaceMembers = async (req, res, next) => {
+  const { spaceId } = req.params;
+  
+  try {
+    // Check if user is a member
+    const memberCheck = await pool.query(
+      'SELECT email FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Only members can view member list' });
+    }
+    
+    // Get members
+    const membersQuery = `
+      SELECT 
+        psm.email,
+        psm.role,
+        psm.joined_at,
+        u.firstname || ' ' || u.lastname as name,
+        u.profilepiclink as avatar
+      FROM private_space_members psm
+      INNER JOIN users u ON psm.email = u.email
+      WHERE psm.space_id = $1
+      ORDER BY psm.role DESC, psm.joined_at ASC
+    `;
+    
+    const result = await pool.query(membersQuery, [spaceId]);
+    
+    return res.status(200).json({
+      members: result.rows
+    });
+    
+  } catch (error) {
+    console.error('Error fetching members:', error);
+    return res.status(500).json({ message: 'Failed to fetch members' });
+  }
+};
+
+// Remove member from private space (admin only)
+const removePrivateSpaceMember = async (req, res, next) => {
+  const { spaceId, memberEmail } = req.params;
+  
+  try {
+    // Check if requester is admin
+    const adminCheck = await pool.query(
+      'SELECT role FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    if (adminCheck.rows.length === 0 || adminCheck.rows[0].role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can remove members' });
+    }
+    
+    // Cannot remove the creator
+    const spaceCheck = await pool.query(
+      'SELECT creator_email FROM private_spaces WHERE space_id = $1',
+      [spaceId]
+    );
+    
+    if (spaceCheck.rows[0].creator_email === memberEmail) {
+      return res.status(400).json({ message: 'Cannot remove the space creator' });
+    }
+    
+    // Remove member
+    const result = await pool.query(
+      'DELETE FROM private_space_members WHERE space_id = $1 AND email = $2 RETURNING email',
+      [spaceId, memberEmail]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Member not found' });
+    }
+    
+    return res.status(200).json({
+      message: 'Member removed successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error removing member:', error);
+    return res.status(500).json({ message: 'Failed to remove member' });
+  }
+};
+
+// Delete private space post (admin or post owner)
+const deletePrivateSpacePost = async (req, res, next) => {
+  const { postId } = req.params;
+  
+  try {
+    // Get post details and check permissions
+    const postQuery = `
+      SELECT 
+        psp.email as post_owner,
+        psp.space_id,
+        psm.role as user_role
+      FROM private_space_posts psp
+      INNER JOIN private_space_members psm ON psp.space_id = psm.space_id
+      WHERE psp.post_id = $1 AND psm.email = $2
+    `;
+    
+    const postCheck = await pool.query(postQuery, [postId, req.user.email]);
+    
+    if (postCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Post not found or access denied' });
+    }
+    
+    const { post_owner, user_role } = postCheck.rows[0];
+    
+    // Check if user can delete (owner or admin)
+    if (post_owner !== req.user.email && user_role !== 'admin') {
+      return res.status(403).json({ message: 'You can only delete your own posts' });
+    }
+    
+    // Delete post (cascade will handle comments)
+    await pool.query('DELETE FROM private_space_posts WHERE post_id = $1', [postId]);
+    
+    return res.status(200).json({
+      message: 'Post deleted successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error deleting post:', error);
+    return res.status(500).json({ message: 'Failed to delete post' });
+  }
+};
+
+// Get users that can be invited to private space (exclude current members)
+const getInvitableUsers = async (req, res, next) => {
+  const { spaceId } = req.params;
+  
+  console.log('getInvitableUsers - spaceId:', spaceId);
+  console.log('getInvitableUsers - req.user:', req.user);
+  
+  try {
+    // Check if requester is admin
+    const adminCheck = await pool.query(
+      'SELECT role FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    console.log('Admin check result:', adminCheck.rows);
+    
+    if (adminCheck.rows.length === 0 || adminCheck.rows[0].role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can view invitable users' });
+    }
+    
+    // Get all users except current members and pending invitees
+    const query = `
+      SELECT DISTINCT 
+        u.email,
+        u.firstname,
+        u.lastname,
+        u.firstname || ' ' || u.lastname as name,
+        u.profilepiclink as avatar,
+        s.schoolname
+      FROM users u
+      LEFT JOIN school s ON u.schoolid = s.schoolid
+      WHERE u.email NOT IN (
+        -- Exclude current members
+        SELECT email FROM private_space_members WHERE space_id = $1
+        UNION
+        -- Exclude users with pending invitations
+        SELECT invitee_email FROM private_space_invitations 
+        WHERE space_id = $1 AND status = 'pending'
+      )
+      AND u.email IS NOT NULL
+      AND u.firstname IS NOT NULL
+      AND u.lastname IS NOT NULL
+      AND u.role = 'Approved'
+      ORDER BY u.firstname, u.lastname
+      LIMIT 50
+    `;
+    
+    console.log('Executing query with spaceId:', spaceId);
+    const result = await pool.query(query, [spaceId]);
+    console.log('Query result:', result.rows.length, 'users found');
+    
+    return res.status(200).json({
+      users: result.rows
+    });
+    
+  } catch (error) {
+    console.error('Error fetching invitable users:', error);
+    return res.status(500).json({ message: 'Failed to fetch users' });
+  }
+};
+
+// Search users for invitation
+const searchInvitableUsers = async (req, res, next) => {
+  const { spaceId } = req.params;
+  const { query: searchQuery } = req.query;
+  
+  console.log('searchInvitableUsers - spaceId:', spaceId);
+  console.log('searchInvitableUsers - searchQuery:', searchQuery);
+  console.log('searchInvitableUsers - req.user:', req.user);
+  
+  try {
+    // Check if requester is admin
+    const adminCheck = await pool.query(
+      'SELECT role FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    if (adminCheck.rows.length === 0 || adminCheck.rows[0].role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can search users' });
+    }
+    
+    if (!searchQuery || searchQuery.trim().length < 2) {
+      return res.status(400).json({ message: 'Search query must be at least 2 characters' });
+    }
+    
+    // Search users by name or email, excluding current members and pending invitees
+    const query = `
+      SELECT DISTINCT 
+        u.email,
+        u.firstname,
+        u.lastname,
+        u.firstname || ' ' || u.lastname as name,
+        u.profilepiclink as avatar,
+        s.schoolname
+      FROM users u
+      LEFT JOIN school s ON u.schoolid = s.schoolid
+      WHERE u.email NOT IN (
+        -- Exclude current members
+        SELECT email FROM private_space_members WHERE space_id = $1
+        UNION
+        -- Exclude users with pending invitations
+        SELECT invitee_email FROM private_space_invitations 
+        WHERE space_id = $1 AND status = 'pending'
+      )
+      AND u.email IS NOT NULL
+      AND u.firstname IS NOT NULL
+      AND u.lastname IS NOT NULL
+      AND u.role = 'Approved'
+      AND (
+        LOWER(u.firstname || ' ' || u.lastname) LIKE LOWER($2)
+        OR LOWER(u.email) LIKE LOWER($2)
+      )
+      ORDER BY u.firstname, u.lastname
+      LIMIT 20
+    `;
+    
+    const result = await pool.query(query, [spaceId, `%${searchQuery.trim()}%`]);
+    console.log('Search result:', result.rows.length, 'users found');
+    
+    return res.status(200).json({
+      users: result.rows
+    });
+    
+  } catch (error) {
+    console.error('Error searching invitable users:', error);
+    return res.status(500).json({ message: 'Failed to search users' });
+  }
+};
+
+// Dissolve private space (admin only)
+const dissolvePrivateSpace = async (req, res, next) => {
+  const { spaceId } = req.params;
+  
+  try {
+    // Check if requester is admin of the space
+    const adminCheck = await pool.query(
+      'SELECT role FROM private_space_members WHERE space_id = $1 AND email = $2',
+      [spaceId, req.user.email]
+    );
+    
+    if (adminCheck.rows.length === 0 || adminCheck.rows[0].role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can dissolve private spaces' });
+    }
+    
+    // Start transaction
+    await pool.query('BEGIN');
+    
+    try {
+      // Delete all comments in posts of this space
+      await pool.query(`
+        DELETE FROM private_space_post_comments 
+        WHERE post_id IN (
+          SELECT post_id FROM private_space_posts WHERE space_id = $1
+        )
+      `, [spaceId]);
+      
+      // Delete all posts in this space
+      await pool.query('DELETE FROM private_space_posts WHERE space_id = $1', [spaceId]);
+      
+      // Delete all invitations for this space
+      await pool.query('DELETE FROM private_space_invitations WHERE space_id = $1', [spaceId]);
+      
+      // Delete all members from this space
+      await pool.query('DELETE FROM private_space_members WHERE space_id = $1', [spaceId]);
+      
+      // Delete the private space itself
+      await pool.query('DELETE FROM private_spaces WHERE space_id = $1', [spaceId]);
+      
+      // Commit transaction
+      await pool.query('COMMIT');
+      
+      return res.status(200).json({ 
+        message: 'Private space dissolved successfully' 
+      });
+      
+    } catch (error) {
+      // Rollback transaction on error
+      await pool.query('ROLLBACK');
+      throw error;
+    }
+    
+  } catch (error) {
+    console.error('Error dissolving private space:', error);
+    return res.status(500).json({ message: 'Failed to dissolve private space' });
+  }
 };
 
 export {
@@ -1896,5 +2620,21 @@ export {
   checkIfMuted,
   blockUser,
   unblockUser,
-  checkIfBlocked
+  checkIfBlocked,
+  createPrivateSpace,
+  getUserPrivateSpaces,
+  getPrivateSpaceDetails,
+  inviteToPrivateSpace,
+  acceptPrivateSpaceInvitation,
+  getPendingInvitations,
+  createPrivateSpacePost,
+  getPrivateSpacePosts,
+  addPrivateSpaceComment,
+  getPrivateSpaceComments,
+  getPrivateSpaceMembers,
+  removePrivateSpaceMember,
+  deletePrivateSpacePost,
+  getInvitableUsers,
+  searchInvitableUsers,
+  dissolvePrivateSpace
 };
