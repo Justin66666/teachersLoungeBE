@@ -83,6 +83,11 @@ import {
 
 const router = express.Router();
 
+// Test route for connectivity
+router.get("/test", (req, res) => {
+  res.status(200).json({ message: "Server is working!", timestamp: new Date().toISOString() });
+});
+
 // Authentication Routes (open)
 router.post("/login", verifyUserLogin);
 router.post("/register", registerNewUser);

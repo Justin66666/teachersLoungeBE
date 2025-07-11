@@ -6,7 +6,10 @@
   "main": "app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node app.js"
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.758.0",
@@ -17,7 +20,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
     "ejs": "latest",
-    "expo": "^48.0.5",
+    "expo": "~48.0.21",
     "expo-cli": "^6.3.2",
     "expo-updates": "~0.16.4",
     "express": "^4.17.1",
@@ -30,12 +33,16 @@
     "react-native": "0.71.14",
     "render": "^0.1.4",
     "sharp": "^0.32.6",
-    "validator": "^13.11.0"
+    "validator": "^13.11.0",
+    "expo-splash-screen": "~0.18.2",
+    "expo-status-bar": "~1.4.4",
+    "react": "18.2.0"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.0.1",
+    "@babel/core": "^7.20.0"
   }
 }

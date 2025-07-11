@@ -983,7 +983,8 @@ const searchUser = async (req, res, next) => {
   if (searchQuery !== "") {
     const sql = `SELECT * FROM USERS 
                  WHERE FirstName ILIKE $1 
-                 OR LastName ILIKE $1`;
+                 OR LastName ILIKE $1
+                 OR Email ILIKE $1`;
 
     try {
       const client = await pool.connect();
@@ -1476,8 +1477,12 @@ const unfriendUser = async (req, res, next) => {
 const getFriendsList = async (req, res, next) => {
   console.log('getFriends hit');
   const userEmail = req.query.userEmail;
-  console.log(req.query.userEmail);
+  console.log('User email for getFriendsList:', userEmail);
 
+  // Debug: Check all friend relationships for this user
+  const debugSql1 = `SELECT * FROM FRIENDS WHERE friender = $1`;
+  const debugSql2 = `SELECT * FROM FRIENDS WHERE friendee = $1`;
+  
   const sql = `SELECT U.email, U.firstname, U.lastname, U.schoolid, U.role
                FROM USERS AS U JOIN 
                   (SELECT friendee AS FriendEmail FROM FRIENDS
@@ -1490,11 +1495,18 @@ const getFriendsList = async (req, res, next) => {
   try {
     const client = await pool.connect();
 
+    // Debug queries
+    const friendsISent = await client.query(debugSql1, [userEmail]);
+    const friendsISentTo = await client.query(debugSql2, [userEmail]);
+    
+    console.log(`DEBUG: Friends ${userEmail} sent requests to:`, friendsISent.rows);
+    console.log(`DEBUG: Friends who sent requests to ${userEmail}:`, friendsISentTo.rows);
+
     const result = await client.query(sql, [userEmail]);
 
     client.release();
 
-    console.log(result.rows);
+    console.log('Final mutual friends result:', result.rows);
     return res.status(200).json({ data: result.rows });
   } catch (error) {
     console.error("Error retrieving friends list:", error.stack);
